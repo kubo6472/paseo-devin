@@ -82,9 +82,22 @@ jobs:
           head_sha="$(git rev-parse FETCH_HEAD)"
           git fetch origin main
           main_sha="$(git rev-parse FETCH_HEAD)"
-          mb="$(git merge-base "$head_sha" "$main_sha")"
-          git diff "$mb" "$head_sha" > /tmp/pr.diff
-          git apply --3way /tmp/pr.diff
+
+          if git merge-base --is-ancestor "$head_sha" HEAD; then
+            echo "This stable tag already contains the PR; building without a patch."
+          else
+            mb="$(git merge-base "$head_sha" "$main_sha")"
+            if [ "$mb" = "$head_sha" ]; then
+              # merged into main but not released in this tag: patch is the
+              # merge commit's diff against its pre-merge parent
+              m="$(git rev-list --merges --ancestry-path "$head_sha..$main_sha" | tail -1)"
+              test -n "$m"
+              git diff "$m^1" "$m" > /tmp/pr.diff
+            else
+              git diff "$mb" "$head_sha" > /tmp/pr.diff
+            fi
+            git apply --3way /tmp/pr.diff
+          fi
 
       - name: Build upstream, then your layer on top
         if: steps.check.outputs.build == 'true'
