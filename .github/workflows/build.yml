@@ -32,7 +32,7 @@ jobs:
       - name: Has upstream changed?
         id: check
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/paseo-custom"   # ghcr needs lowercase
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"   # owner/repo, lowercased (ghcr requires it)
           digest="$(docker buildx imagetools inspect "$BASE_IMAGE" --format '{{json .Manifest}}' | jq -r .digest)"
           short="${digest#sha256:}"; short="${short:0:12}"
           echo "image=$image" >> "$GITHUB_OUTPUT"
