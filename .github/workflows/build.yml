@@ -39,13 +39,13 @@ jobs:
           tag="$(git ls-remote --tags --refs --sort=-v:refname "$UPSTREAM" \
                  | sed 's|.*refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed -n '1p')"
           # current head commit of the PR
-          pr_sha="$(git ls-remote "$UPSTREAM" "refs/pull/$PR/head" | cut -c1-7)"
+          pr_sha="$(git ls-remote "$UPSTREAM" "refs/pull/$PR/head" | cut -f1)"
           if [ -z "$tag" ] || [ -z "$pr_sha" ]; then
             echo "Could not resolve a stable tag or the PR head" >&2
             exit 1
           fi
 
-          key="${tag}-pr${PR}-${pr_sha}"
+          key="${tag}-pr${PR}-${pr_sha:0:7}"
           echo "image=$image"  >> "$GITHUB_OUTPUT"
           echo "tag=$tag"      >> "$GITHUB_OUTPUT"
           echo "pr_sha=$pr_sha" >> "$GITHUB_OUTPUT"
@@ -75,11 +75,16 @@ jobs:
         env:
           EXPECTED_SHA: ${{ steps.check.outputs.pr_sha }}
         run: |
-          curl -fsSL "https://github.com/getpaseo/paseo/pull/${PR}.diff" -o /tmp/pr.diff
+          set -euo pipefail
+          # fetch the recorded head and generate the patch locally, so the
+          # applied diff is bound to EXPECTED_SHA by construction
+          git fetch origin "$EXPECTED_SHA"
+          head_sha="$(git rev-parse FETCH_HEAD)"
+          git fetch origin main
+          main_sha="$(git rev-parse FETCH_HEAD)"
+          mb="$(git merge-base "$head_sha" "$main_sha")"
+          git diff "$mb" "$head_sha" > /tmp/pr.diff
           git apply --3way /tmp/pr.diff
-          # the diff must match the head the build key was computed from
-          head="$(git ls-remote "$UPSTREAM" "refs/pull/$PR/head" | cut -c1-7)"
-          test "$head" = "$EXPECTED_SHA"
 
       - name: Build upstream, then your layer on top
         if: steps.check.outputs.build == 'true'
