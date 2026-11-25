@@ -21,6 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: docker/login-action@v3
         with:
@@ -31,18 +33,23 @@ jobs:
       - name: Has anything changed?
         id: check
         run: |
+          set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           # newest stable vX.Y.Z tag (betas excluded)
           tag="$(git ls-remote --tags --refs --sort=-v:refname "$UPSTREAM" \
                  | sed 's|.*refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed -n '1p')"
           # current head commit of the PR
           pr_sha="$(git ls-remote "$UPSTREAM" "refs/pull/$PR/head" | cut -c1-7)"
-          test -n "$tag" && test -n "$pr_sha"
+          if [ -z "$tag" ] || [ -z "$pr_sha" ]; then
+            echo "Could not resolve a stable tag or the PR head" >&2
+            exit 1
+          fi
 
           key="${tag}-pr${PR}-${pr_sha}"
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag"     >> "$GITHUB_OUTPUT"
-          echo "key=$key"     >> "$GITHUB_OUTPUT"
+          echo "image=$image"  >> "$GITHUB_OUTPUT"
+          echo "tag=$tag"      >> "$GITHUB_OUTPUT"
+          echo "pr_sha=$pr_sha" >> "$GITHUB_OUTPUT"
+          echo "key=$key"      >> "$GITHUB_OUTPUT"
 
           if [ "$GITHUB_EVENT_NAME" != push ] \
              && docker buildx imagetools inspect "$image:src-$key" >/dev/null 2>&1; then
@@ -60,11 +67,19 @@ jobs:
           ref: ${{ steps.check.outputs.tag }}
           path: upstream
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Apply the PR
         if: steps.check.outputs.build == 'true'
         working-directory: upstream
-        run: curl -fsSL "https://github.com/getpaseo/paseo/pull/${PR}.diff" | git apply --3way
+        env:
+          EXPECTED_SHA: ${{ steps.check.outputs.pr_sha }}
+        run: |
+          curl -fsSL "https://github.com/getpaseo/paseo/pull/${PR}.diff" -o /tmp/pr.diff
+          git apply --3way /tmp/pr.diff
+          # the diff must match the head the build key was computed from
+          head="$(git ls-remote "$UPSTREAM" "refs/pull/$PR/head" | cut -c1-7)"
+          test "$head" = "$EXPECTED_SHA"
 
       - name: Build upstream, then your layer on top
         if: steps.check.outputs.build == 'true'
