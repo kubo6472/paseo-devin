@@ -89,9 +89,12 @@ jobs:
             mb="$(git merge-base "$head_sha" "$main_sha")"
             if [ "$mb" = "$head_sha" ]; then
               # merged into main but not released in this tag: patch is the
-              # merge commit's diff against its pre-merge parent
-              m="$(git rev-list --merges --ancestry-path "$head_sha..$main_sha" | tail -1)"
+              # integration merge's diff against its mainline parent. The
+              # oldest merge on main's first-parent chain containing the
+              # head is that commit.
+              m="$(git rev-list --first-parent --merges "$head_sha..$main_sha" | tail -1)"
               test -n "$m"
+              git merge-base --is-ancestor "$head_sha" "$m^2"
               git diff "$m^1" "$m" > /tmp/pr.diff
             else
               git diff "$mb" "$head_sha" > /tmp/pr.diff
