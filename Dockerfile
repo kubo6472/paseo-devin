@@ -1,4 +1,5 @@
-FROM ghcr.io/getpaseo/paseo:latest
+ARG BASE_IMAGE=ghcr.io/getpaseo/paseo:latest
+FROM ${BASE_IMAGE}
 
 USER root
 

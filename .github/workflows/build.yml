@@ -1,11 +1,11 @@
-name: Build paseo-custom
+name: Build paseo (stable + PR)
 
 on:
   schedule:
-    - cron: "23 */6 * * *"      # every 6 hours; the check below makes it cheap
+    - cron: "23 */6 * * *"
   push:
     branches: [main]
-    paths: [Dockerfile, .github/workflows/build.yml]   # your own edits always rebuild
+    paths: [Dockerfile, .github/workflows/build.yml]
   workflow_dispatch:
 
 permissions:
@@ -13,15 +13,16 @@ permissions:
   packages: write
 
 env:
-  BASE_IMAGE: ghcr.io/getpaseo/paseo:latest
+  UPSTREAM: https://github.com/getpaseo/paseo
+  PR: "9704"
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
+        with:
+          persist-credentials: false
 
       - uses: docker/login-action@v3
         with:
@@ -29,30 +30,84 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Has upstream changed?
+      - name: Has anything changed?
         id: check
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY,,}"   # owner/repo, lowercased (ghcr requires it)
-          digest="$(docker buildx imagetools inspect "$BASE_IMAGE" --format '{{json .Manifest}}' | jq -r .digest)"
-          short="${digest#sha256:}"; short="${short:0:12}"
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          echo "short=$short" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          # newest stable vX.Y.Z tag (betas excluded)
+          tag="$(git ls-remote --tags --refs --sort=-v:refname "$UPSTREAM" \
+                 | sed 's|.*refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed -n '1p')"
+          # current head commit of the PR
+          pr_sha="$(git ls-remote "$UPSTREAM" "refs/pull/$PR/head" | cut -f1)"
+          if [ -z "$tag" ] || [ -z "$pr_sha" ]; then
+            echo "Could not resolve a stable tag or the PR head" >&2
+            exit 1
+          fi
 
-          # Skip only if this isn't a push and we already built on this exact base.
+          key="${tag}-pr${PR}-${pr_sha:0:7}"
+          echo "image=$image"  >> "$GITHUB_OUTPUT"
+          echo "tag=$tag"      >> "$GITHUB_OUTPUT"
+          echo "pr_sha=$pr_sha" >> "$GITHUB_OUTPUT"
+          echo "key=$key"      >> "$GITHUB_OUTPUT"
+
           if [ "$GITHUB_EVENT_NAME" != push ] \
-             && docker buildx imagetools inspect "$image:base-$short" >/dev/null 2>&1; then
+             && docker buildx imagetools inspect "$image:src-$key" >/dev/null 2>&1; then
             echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "Already built on base $short, nothing to do."
+            echo "Already built $key, nothing to do."
           else
             echo "build=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: docker/build-push-action@v6
+      # fetch-depth 0: `git apply --3way` needs the base blobs from history.
+      - uses: actions/checkout@v4
         if: steps.check.outputs.build == 'true'
         with:
-          context: .
-          pull: true            # always re-pull the FROM image
-          push: true
-          tags: |
-            ${{ steps.check.outputs.image }}:latest
-            ${{ steps.check.outputs.image }}:base-${{ steps.check.outputs.short }}
+          repository: getpaseo/paseo
+          ref: ${{ steps.check.outputs.tag }}
+          path: upstream
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Apply the PR
+        if: steps.check.outputs.build == 'true'
+        working-directory: upstream
+        env:
+          EXPECTED_SHA: ${{ steps.check.outputs.pr_sha }}
+        run: |
+          set -euo pipefail
+          # fetch the recorded head and generate the patch locally, so the
+          # applied diff is bound to EXPECTED_SHA by construction
+          git fetch origin "$EXPECTED_SHA"
+          head_sha="$(git rev-parse FETCH_HEAD)"
+          git fetch origin main
+          main_sha="$(git rev-parse FETCH_HEAD)"
+
+          if git merge-base --is-ancestor "$head_sha" HEAD; then
+            echo "This stable tag already contains the PR; building without a patch."
+          else
+            mb="$(git merge-base "$head_sha" "$main_sha")"
+            if [ "$mb" = "$head_sha" ]; then
+              # merged into main but not released in this tag: the integration
+              # merge is the first commit on main's first-parent chain whose
+              # history contains the head
+              m="$(git rev-list --first-parent --reverse "$head_sha..$main_sha" | while read -r c; do
+                if git merge-base --is-ancestor "$head_sha" "$c"; then echo "$c"; break; fi
+              done)"
+              test -n "$m"
+              git merge-base --is-ancestor "$head_sha" "$m^2"
+              git diff "$m^1" "$m" > /tmp/pr.diff
+            else
+              git diff "$mb" "$head_sha" > /tmp/pr.diff
+            fi
+            git apply --3way /tmp/pr.diff
+          fi
+
+      - name: Build upstream, then your layer on top
+        if: steps.check.outputs.build == 'true'
+        run: |
+          image="${{ steps.check.outputs.image }}"
+          docker build -f upstream/docker/base/Dockerfile -t paseo-base:local upstream
+          docker build --build-arg BASE_IMAGE=paseo-base:local \
+            -t "$image:latest" -t "$image:src-${{ steps.check.outputs.key }}" .
+          docker push --all-tags "$image"
